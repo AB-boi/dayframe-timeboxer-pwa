@@ -1,0 +1,1221 @@
+<!doctype html>
+<!--
+  ============================================================================
+  DAYFRAME: A single-file daily time-blocking planner
+  ============================================================================
+
+  WHAT IT IS
+  A one-page planner for dividing a 24-hour day into named blocks. Blocks sit
+  on a vertical timeline (1 pixel = 1 minute). Each block belongs to an "area"
+  (for example Study, Sleep, Fitness). A sidebar shows statistics about the
+  day, and a header offers undo/redo, backup, export and display options.
+
+  HOW TO USE IT (for humans)
+  - Double-click or double-tap empty timeline space to create a block there.
+  - Click a block to select it. Drag its body to move it. Drag its white grab
+    handles (top or bottom edge) to resize it.
+  - Double-click or double-tap a block to edit its name, area and times.
+  - Press Escape, or click empty space, to deselect.
+  - Undo and redo: the arrow buttons, or Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z.
+  - Keyboard, while a block is selected: arrows move it by 5 minutes (Shift
+    moves by 15), Option+arrows resize it, Enter opens the editor, and Delete
+    or Backspace removes it.
+
+  DATA MODEL (everything the app stores)
+  - areas: an ordered list. Each area is { id, name, color, countLongest }.
+      id            short unique string. Default ids: 'pg', 'leis', 'fit', 'sleep'.
+      name          label shown in the UI (max 40 characters).
+      color         a hex color from PALETTE.
+      countLongest  if false, this area's blocks are ignored by the
+                    "Longest block" statistic (used for sleep).
+  - boxes: the blocks. Each block is { id, name, area, start, end }.
+      start         minutes after midnight, 0 to 1439.
+      end           minutes after midnight, 1 to 1440. 1440 means midnight at
+                    the end of the day. An end smaller than start means the
+                    block crosses midnight (for example 22:00 to 06:00 is
+                    start 1320, end 360).
+      The app also keeps a derived flag, conf, on blocks that overlap others.
+      conf is recalculated on every render and is never stored.
+
+  STORAGE (all in the browser's localStorage, which is per device and browser)
+  - 'dayframe-v3'     areas and boxes.
+  - 'dayframe-fmt'    '12' or '24' for the time format.
+  - 'dayframe-theme'  'light' or 'dark'. If absent, the system setting is used.
+  - 'dayframe-title'  the last title typed for the PNG export.
+
+  FILE LAYOUT (search for these section titles)
+  1. Styles: colors, layout, timeline, blocks, dialogs, responsive rules, print
+  2. Markup: header, timeline container, sidebar, block and area editors
+  3. Script:
+     a. Settings and constants
+     b. Time formatting and parsing
+     c. Block geometry: wrap-around, lanes, statistics
+     d. State, history and persistence
+     e. Timeline rendering
+     f. Sidebar rendering
+     g. Display controls: format and theme
+     h. Block editor dialog
+     i. Area editor dialog
+     j. Timeline pointer input: move, resize, tap
+     k. Keyboard shortcuts
+     l. Header buttons: backup, restore, clear, add
+     m. PNG export
+     n. Area reordering
+     o. One-time confetti celebration
+     p. Startup
+
+  SAFE TO CHANGE WITHOUT TOUCHING LOGIC
+  Colors and sizes in the Styles section, the PALETTE array, DEFAULT_AREAS
+  names, and the text of messages passed to toast().
+
+  CONVENTIONS
+  - Every change that the user makes goes through commit(before), where
+    `before` is a snapshot taken before the change. That gives undo for free.
+  - Anything rendered is rebuilt from the data by render(). The data is the
+    source of truth; the DOM is a view of it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Dayframe</title>
+<!--
+  ICON LICENSE
+  The app icon is "Report Columns" from Iconoir (https://iconoir.com/icons/report-columns).
+  Iconoir is MIT licensed. Copyright (c) 2020-2026 Iconoir contributors.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+-->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxODAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgMTgwIDE4MCI+CjxyZWN0IHdpZHRoPSIxODAiIGhlaWdodD0iMTgwIiByeD0iNDAiIGZpbGw9IiMwYTg0ZmYiLz4KPGcgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoMzQgMzQpIHNjYWxlKDQuNjY3KSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmZmZmIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj4KPHBhdGggZD0iTTMgNy40VjMuNkMzIDMuMjY4NjMgMy4yNjg2MyAzIDMuNiAzSDkuNEM5LjczMTM3IDMgMTAgMy4yNjg2MyAxMCAzLjZWNy40QzEwIDcuNzMxMzcgOS43MzEzNyA4IDkuNCA4SDMuNkMzLjI2ODYzIDggMyA3LjczMTM3IDMgNy40WiIvPgo8cGF0aCBkPSJNMTQgMjAuNFYxNi42QzE0IDE2LjI2ODYgMTQuMjY4NiAxNiAxNC42IDE2SDIwLjRDMjAuNzMxNCAxNiAyMSAxNi4yNjg2IDIxIDE2LjZWMjAuNEMyMSAyMC43MzE0IDIwLjczMTQgMjEgMjAuNCAyMUgxNC42QzE0LjI2ODYgMjEgMTQgMjAuNzMxNCAxNCAyMC40WiIvPgo8cGF0aCBkPSJNMTQgMTIuNFYzLjZDMTQgMy4yNjg2MyAxNC4yNjg2IDMgMTQuNiAzSDIwLjRDMjAuNzMxNCAzIDIxIDMuMjY4NjMgMjEgMy42VjEyLjRDMjEgMTIuNzMxNCAyMC43MzE0IDEzIDIwLjQgMTNIMTQuNkMxNC4yNjg2IDEzIDE0IDEyLjczMTQgMTQgMTIuNFoiLz4KPHBhdGggZD0iTTMgMjAuNFYxMS42QzMgMTEuMjY4NiAzLjI2ODYzIDExIDMuNiAxMUg5LjRDOS43MzEzNyAxMSAxMCAxMS4yNjg2IDEwIDExLjZWMjAuNEMxMCAyMC43MzE0IDkuNzMxMzcgMjEgOS40IDIxSDMuNkMzLjI2ODYzIDIxIDMgMjAuNzMxNCAzIDIwLjRaIi8+CjwvZz4KPC9zdmc+">
+<link rel="icon" type="image/png" sizes="32x32" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA3UlEQVR4nO2XvQ6DMAyEfYZSL4A/NpZAi6Tg/kVFl5L6LoPWeO0Q1Ak5Y1Ri1mEyHExn2cYOzDj0zVEBqXL0mvmBWWmVNdtVdtJlQWj4E4xSLKCBSmRxpKe6qK3pYqX0P/QOmKVc0O4xqi56NhoAQk1B2ZRxfHqkwmvzrE6t+n8OUOhWBxpr5hZwRGDjE3s7nPDfBy1ALNvmqcNwIA4j7lsNlHGeJszIo+SgKeYVrqkDXeFu34gvrb6FpM6oYXcAAAAASUVORK5CYII=">
+<link rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9zQYyAAAB6klEQVR4nO3cQWrDMBQF0LvvKHuDmQe5gRUaM9ZyuWtOkR6ZJPYp1zBpEjB5AVBSxS+ZkDC0RHYoSngP9ubuxpcKC9nzshb+KlQGf6F6dtzq7oakc94MpZ99gbIbCC+cPFYvFj5nJoQbVTrIbhBeFu7bKm0/Vkiv3UAaUe9iIT2Vt5+9zFSmi5Cru3rJvXjbRWJT5PizVeHcyn9mTm6y2PxRt3PuM1q3fUfOi7W7ZIBaKeXJ25VtH0HbV9Kc1G1pzW7BJrwSTuuwGGxcbzi6vUzqCuvHgJlZp6r+OtQGSuaB7pqxW1o3gJmo+hjO2+tRP0ZdFWz+0sgoJ0D7Sw07r2Trs7Nh7Xw2l5lZd1SJ+r92+QZEQmN1nDv09xXbhp4gxHw/pGP4Zl9u3ta6oQIKi2KzaXxqFdm3I5qhdZy43eOxPpjthcvSe1L2mcaBxmBxYsHpHB9efcP1Kr1eGn6bztD8NvCD/AhUHl/ncHZ97AAAAAElFTkSuQmCC">
+<style>
+/* ==========================================================================
+   1. STYLES
+   The look follows Apple's HIG: system fonts, translucent header, rounded
+   grouped cards, and system-style accent colors. Light and dark values are
+   defined in three places (light default, explicit dark, and system dark)
+   so that the manual toggle can override the system setting.
+   ========================================================================== */
+
+/* Light theme values (the default). */
+:root{
+  --bg:#f2f2f7;           /* page background */
+  --panel:#fff;           /* cards, timeline, dialogs */
+  --fill:#fff;            /* raised surfaces */
+  --sep:rgba(60,60,67,.16);     /* hairline separators */
+  --l1:#000;              /* primary text */
+  --l2:rgba(60,60,67,.62);      /* secondary text */
+  --ctl:rgba(120,120,128,.12);  /* button and control backgrounds */
+  --blue:#007aff;         /* accent: buttons, selection */
+  --red:#ff3b30;          /* overlaps, "now" line, warnings */
+  --grid:rgba(60,60,67,.1);     /* faint dashed half-hour guides */
+  --half:rgba(60,60,67,.26);    /* full-hour guide lines */
+  --seg-on:#fff;          /* selected segment of the 12/24h control */
+  --lift:rgba(0,0,0,.16); /* shadow under a lifted block or area row */
+}
+/* Dark theme values, applied when the user picks dark manually. */
+:root[data-theme=dark]{
+  --bg:#000;--panel:#1c1c1e;--fill:#2c2c2e;--sep:rgba(84,84,88,.65);
+  --l1:#fff;--l2:rgba(235,235,245,.6);--ctl:rgba(120,120,128,.24);
+  --blue:#0a84ff;--red:#ff453a;--grid:rgba(84,84,88,.55);
+  --half:rgba(235,235,245,.22);--seg-on:#636366;--lift:rgba(0,0,0,.55);
+}
+/* Dark theme values, applied when the system is dark and the user has not overridden it. */
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme=light]){
+    --bg:#000;--panel:#1c1c1e;--fill:#2c2c2e;--sep:rgba(84,84,88,.65);
+    --l1:#fff;--l2:rgba(235,235,245,.6);--ctl:rgba(120,120,128,.24);
+    --blue:#0a84ff;--red:#ff453a;--grid:rgba(84,84,88,.55);
+    --half:rgba(235,235,245,.22);--seg-on:#636366;--lift:rgba(0,0,0,.55);
+  }
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--l1);font:14px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none;padding:0}
+:focus-visible{outline:3px solid color-mix(in srgb,var(--blue) 55%,transparent);outline-offset:2px}
+
+/* Page frame: header across the top, sidebar on the left, timeline on the right. */
+.app{display:grid;grid-template-columns:300px minmax(0,1fr);grid-template-rows:auto 1fr;height:100vh;height:100dvh;overflow:hidden}
+header{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:10px 16px;background:color-mix(in srgb,var(--panel) 82%,transparent);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:.5px solid var(--sep)}
+.title{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.date{color:var(--l2);font-size:13px;font-variant-numeric:tabular-nums}
+.bar{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
+
+/* Buttons. */
+.btn{min-height:30px;padding:0 12px;border-radius:8px;background:var(--ctl);font-size:13px;font-weight:500;white-space:nowrap}
+.btn:hover{filter:brightness(.96)}
+.btn:disabled{opacity:.35;cursor:default}
+.btn.prime{background:var(--blue);color:#fff;font-weight:600}
+.btn.danger{color:var(--red)}
+.btn.ico{display:inline-flex;align-items:center;justify-content:center;min-width:34px;padding:0 8px}
+.btn.ico svg{display:block}
+/* Segmented control (used for the 12h / 24h switch). */
+.hseg{display:inline-flex;background:var(--ctl);border-radius:8px;padding:2px;gap:2px}
+.hseg button{min-height:26px;padding:0 10px;border-radius:6px;font-size:12px;font-weight:500}
+.hseg button[aria-pressed=true]{background:var(--seg-on);box-shadow:0 1px 3px rgba(0,0,0,.15);font-weight:600}
+
+/* Sidebar and cards. */
+aside{grid-column:1;grid-row:2;min-height:0;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:14px;border-right:.5px solid var(--sep)}
+main{grid-column:2;grid-row:2;overflow:auto;position:relative;background:var(--panel)}
+.card{flex-shrink:0;background:var(--panel);border-radius:12px;overflow:hidden;box-shadow:0 0 0 .5px var(--sep)}
+.card h3{margin:0;padding:12px 14px 6px;font-size:12px;font-weight:600;color:var(--l2);text-transform:uppercase;letter-spacing:.04em}
+.row{display:flex;align-items:center;gap:10px;padding:8px 14px;min-height:44px;width:100%;text-align:left;border-top:.5px solid var(--sep)}
+.row:hover{background:var(--ctl)}
+.row.add{color:var(--blue);font-weight:500}
+.arow{cursor:pointer}
+.grip{display:flex;color:var(--l2);padding:6px 4px;margin:0 -4px 0 -8px;cursor:grab;touch-action:none}
+.arow.lifting{position:relative;z-index:2;background:var(--panel);box-shadow:0 6px 16px var(--lift);border-radius:10px}
+.dot{width:10px;height:10px;border-radius:50%;flex:none}
+.grow{flex:1;min-width:0}
+.muted{color:var(--l2);font-size:12px;font-variant-numeric:tabular-nums}
+
+/* Stats grid: two columns. An odd last cell spans the full width. */
+.stats{display:grid;grid-template-columns:1fr 1fr}
+.stat{padding:10px 14px 12px;border-top:.5px solid var(--sep)}
+.stat:nth-child(odd){border-right:.5px solid var(--sep)}
+.stat:last-child:nth-child(odd){border-right:0;grid-column:1/-1;display:flex;justify-content:space-between;align-items:center}
+.stat:last-child:nth-child(odd) b{margin-top:0}
+.stat b{display:block;font-size:20px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums;margin-top:2px}
+.stat .dot{display:inline-block;width:8px;height:8px;margin-right:6px;vertical-align:middle}
+.warn{color:var(--red)!important}
+
+/* Timeline: 1440 px tall, so 1 px = 1 minute. */
+.tl{position:relative;margin:16px 16px 40px 72px;height:1440px}
+.hr{position:absolute;left:-70px;width:58px;text-align:right;font-size:11px;color:var(--l2);transform:translateY(-7px);font-variant-numeric:tabular-nums;white-space:nowrap}
+.hr.nd{font-weight:600;color:var(--l1)}   /* "Next day" label at midnight */
+.ln{position:absolute;left:0;right:0;border-top:.5px solid var(--half)}    /* full hours */
+.ln.half{border-top:1px dashed var(--grid)}                                /* half hours */
+
+/* Blocks. Position and size are set inline by the script. */
+.blk{position:absolute;border-radius:8px;background:color-mix(in srgb,var(--c) 16%,var(--panel));box-shadow:inset 3px 0 0 var(--c);padding:4px 9px 4px 11px;overflow:visible;cursor:grab;touch-action:none;user-select:none;min-height:14px}
+.blk:active{cursor:grabbing}
+.blk.sel{z-index:3;background:color-mix(in srgb,var(--c) 28%,var(--panel));box-shadow:inset 3px 0 0 var(--c),0 6px 16px var(--lift),0 1px 3px var(--lift)}
+.blk.conf{outline:1.5px dashed var(--red);outline-offset:-1px}     /* overlapping blocks */
+.blk .nm{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.blk .tm{font-size:11px;color:var(--l2);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
+/* Short blocks (under 40 minutes) put name and time on one line. */
+.blk.short{display:flex;align-items:center;gap:8px;padding-top:0;padding-bottom:0}
+.blk.short .nm{flex:0 1 auto;min-width:0}
+.blk.short .tm{flex:none;font-size:10.5px}
+/* Area tag: visible only on a selected block. */
+.atag{position:absolute;right:6px;top:50%;transform:translateY(-50%);font-size:10px;font-weight:600;line-height:14px;padding:0 7px;border-radius:7px;background:color-mix(in srgb,var(--c) 22%,var(--panel));color:var(--c);pointer-events:none;display:none;white-space:nowrap}
+.blk.sel .atag{display:block}
+.blk.sel .nm{margin-right:64px}
+
+/* Grab handles: small white pills centred on the top and bottom edges. */
+.hdl{position:absolute;left:50%;width:44px;margin-left:-22px;height:20px;cursor:ns-resize;display:none;touch-action:none}
+.hdl::after{content:"";position:absolute;left:50%;top:50%;width:28px;height:5px;margin:-2.5px 0 0 -14px;border-radius:3px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 1px 3px rgba(0,0,0,.28)}
+.blk.sel .hdl{display:block}
+.hdl[data-h=top]{top:-10px}
+.hdl[data-h=bot]{bottom:-10px}
+
+/* "Now" line and its countdown label. */
+.now{position:absolute;left:-6px;right:0;height:2px;background:var(--red);pointer-events:none;z-index:2}
+.now::before{content:"";position:absolute;left:0;top:-3px;width:8px;height:8px;border-radius:50%;background:var(--red)}
+.nowlbl{position:absolute;right:8px;top:-9px;font-size:11px;font-weight:600;line-height:16px;color:var(--red);background:var(--panel);padding:0 6px;border-radius:6px;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* Toast message. */
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,16px);opacity:0;background:var(--l1);color:var(--panel);padding:9px 16px;border-radius:10px;font-size:13px;transition:.2s;pointer-events:none;z-index:9;max-width:92vw;text-align:center}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+
+/* Dialogs (block editor and area editor). */
+dialog{border:0;border-radius:14px;padding:0;width:min(400px,92vw);background:var(--panel);color:var(--l1);box-shadow:0 20px 60px rgba(0,0,0,.3)}
+dialog::backdrop{background:rgba(0,0,0,.25);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+dialog form{padding:20px}
+dialog h2{margin:0 0 14px;font-size:17px;font-weight:600;letter-spacing:-.01em}
+.field{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:40px;margin-bottom:8px}
+.field span{color:var(--l2);font-size:13px}
+.field input,.field select{background:var(--ctl);border:0;border-radius:7px;padding:6px 9px;min-height:32px;color:var(--l1)}
+#fname{flex:1;font-weight:500}
+#fs,#fe{width:150px;text-align:right;font-variant-numeric:tabular-nums}
+.field select{max-width:60%}
+.chk{width:20px!important;height:20px!important;min-height:0!important;padding:0!important;background:none!important;accent-color:var(--blue)}
+.note{margin:0 0 10px;font-size:12px;color:var(--l2);min-height:16px}
+.sws{display:flex;gap:12px;flex-wrap:wrap;margin:8px 2px 14px}
+.sw{width:28px;height:28px;border-radius:50%;box-shadow:0 0 0 2px var(--panel),0 0 0 3px transparent}
+.sw[aria-pressed=true]{box-shadow:0 0 0 2px var(--panel),0 0 0 4px var(--l1)}
+.acts{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:14px}
+.acts .btn.prime{margin-left:6px}
+
+/* Touch devices: larger tap targets. */
+@media (pointer:coarse){
+  .btn{min-height:44px}
+  .hdl{height:22px}
+  .row{min-height:52px}
+  .field input,.field select{min-height:40px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* Narrow screens (phones): one column, header buttons wrap onto rows. */
+@media (max-width:760px){
+  .app{display:flex;flex-direction:column;height:auto;overflow:visible}
+  header{position:sticky;top:0;z-index:5;flex-wrap:wrap}
+  .date{display:none}
+  .bar{width:100%;margin-left:0;flex-wrap:wrap;overflow:visible;justify-content:flex-start;row-gap:6px}
+  main{order:1;overflow:visible}
+  aside{order:2;overflow:visible;border-right:0;border-top:.5px solid var(--sep)}
+  .tl{margin:12px 10px 40px 58px}
+  .hr{left:-54px;width:46px;font-size:10px}
+}
+
+/* Printing: show the timeline only. */
+@media print{
+  header .bar,aside,dialog,.toast{display:none!important}
+  .app{display:block;height:auto;overflow:visible}
+  main{overflow:visible}
+  .tl{margin:8px 0 0 72px}
+}
+</style>
+</head>
+<body>
+<!-- ==========================================================================
+     2. MARKUP
+     Static structure only. Everything inside the timeline, the stats grid,
+     and the area list is generated by the script.
+     ========================================================================== -->
+<div class="app">
+
+<!-- Header: title, date, and all controls. -->
+<header>
+  <div class="title">Dayframe</div>
+  <div class="date" id="date"></div>
+  <div class="bar">
+    <button class="btn ico" id="undo" title="Undo (⌘Z)" aria-label="Undo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
+    <button class="btn ico" id="redo" title="Redo (⇧⌘Z)" aria-label="Redo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
+    <div class="hseg" id="fmt" role="group" aria-label="Time format"><button data-f="12" aria-pressed="false">12h</button><button data-f="24" aria-pressed="false">24h</button></div>
+    <button class="btn ico" id="theme" title="Dark mode" aria-label="Toggle dark mode"></button>
+    <button class="btn" id="png">Export PNG</button>
+    <button class="btn" id="bak">Backup</button>
+    <button class="btn" id="res">Restore</button>
+    <button class="btn danger" id="clr">Clear day</button>
+    <button class="btn prime" id="add">+ New block</button>
+  </div>
+</header>
+
+<!-- Timeline: filled in by paint(). -->
+<main><div class="tl" id="tl"></div></main>
+
+<!-- Sidebar: stats grid and area list, both filled in by renderSide(). -->
+<aside>
+  <section class="card"><h3>Stats</h3><div class="stats" id="statsgrid"></div></section>
+  <section class="card"><h3>Areas</h3><div id="areas"></div></section>
+</aside>
+</div>
+
+<!-- Hidden file picker used by "Restore". -->
+<input type="file" id="file" accept="application/json" hidden>
+
+<!-- Block editor dialog. -->
+<dialog id="dlg">
+  <form id="form">
+    <h2 id="dtitle">New block</h2>
+    <div class="field"><input type="text" id="fname" maxlength="90" placeholder="e.g. Test review" required autocomplete="off" aria-label="Name"></div>
+    <div class="field"><span>Area</span><select id="farea"></select></div>
+    <div class="field"><span>Starts</span><input type="time" id="fs" required aria-label="Start time"></div>
+    <div class="field"><span>Ends</span><input type="time" id="fe" required aria-label="End time"></div>
+    <p class="note" id="fhint"></p>
+    <div class="acts">
+      <button type="button" class="btn danger" id="fdel">Delete</button>
+      <div><button type="button" class="btn" id="fcancel">Cancel</button><button class="btn prime" type="submit">Save</button></div>
+    </div>
+  </form>
+</dialog>
+
+<!-- Area editor dialog. -->
+<dialog id="adlg">
+  <form id="aform">
+    <h2 id="atitle">New area</h2>
+    <div class="field"><input type="text" id="aname" maxlength="40" placeholder="Area name" required autocomplete="off" aria-label="Area name"></div>
+    <label class="field"><span>Count toward longest block</span><input type="checkbox" id="acount" class="chk"></label>
+    <div class="sws" id="aswatch" role="group" aria-label="Color"></div>
+    <div class="acts">
+      <button type="button" class="btn danger" id="adel">Delete</button>
+      <div><button type="button" class="btn" id="acancel">Cancel</button><button class="btn prime" type="submit">Save</button></div>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+/* ==========================================================================
+   3. SCRIPT
+   Everything runs inside one function so no names leak into the page.
+   The sections below are in dependency order: helpers first, then state,
+   then rendering, then input handling, and startup last.
+   ========================================================================== */
+(()=>{
+
+/* ---------------------------------------------------------------------------
+   3a. SETTINGS AND CONSTANTS
+   --------------------------------------------------------------------------- */
+
+// localStorage keys (see the header comment).
+const KEY='dayframe-v3', FMT_KEY='dayframe-fmt', THEME_KEY='dayframe-theme', TITLE_KEY='dayframe-title';
+
+// Colors a new area can use. The first nine are offered in the area editor.
+const PALETTE=['#0a84ff','#ff9f0a','#30d158','#bf5af2','#ff375f','#64d2ff','#ffd60a','#5e5ce6','#ac8e68'];
+
+// The three-lines icon used as the drag grip on area rows.
+const GRIP='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 8h16M4 12h16M4 16h16"/></svg>';
+
+// The four areas a new user starts with. Sleep does not count toward "Longest block".
+const DEFAULT_AREAS=()=>[
+  {id:'pg',name:'Study',color:PALETTE[0]},
+  {id:'leis',name:'Leisure & Chores',color:PALETTE[1]},
+  {id:'fit',name:'Fitness',color:PALETTE[2]},
+  {id:'sleep',name:'Sleep',color:PALETTE[3],countLongest:false}
+];
+
+const $=id=>document.getElementById(id);
+
+/* ---------------------------------------------------------------------------
+   3b. TIME FORMATTING AND PARSING
+   Minutes since midnight are shown as "9:30 AM" (12h) or "09:30" (24h).
+   A value of 1440 means the end of the day.
+   --------------------------------------------------------------------------- */
+
+let fmt=localStorage.getItem(FMT_KEY)==='12'?'12':'24';   // current display format
+const pad=n=>String(n).padStart(2,'0');
+
+// Format minutes for a block's start or end time.
+const fmtT=m=>{
+  if(m>=1440)return fmt==='24'?'24:00':'Midnight';
+  const h=m/60|0, mi=m%60;
+  return fmt==='24'?`${pad(h)}:${pad(mi)}`:`${h%12||12}:${pad(mi)} ${h<12?'AM':'PM'}`;
+};
+// Format an hour label on the timeline ("9 AM" in 12h, "09:00" in 24h).
+const fmtHour=h=>fmt==='24'?`${pad(h)}:00`:`${h%12||12} ${h<12?'AM':'PM'}`;
+// Format a length in minutes as "1h 30m", "2h" or "45m".
+const fd=m=>{const h=m/60|0,r=m%60;return h?`${h}h${r?' '+r+'m':''}`:`${r}m`};
+// Convert minutes to the "HH:MM" text that <input type="time"> expects.
+const toHM=m=>pad(m>=1440?0:m/60|0)+':'+pad(m%60);
+
+// Read a time the user typed, such as "9:30 AM", "21:30" or "midnight".
+// Returns minutes, or null if the text is not a valid time.
+function parseTime(str){
+  const s=str.trim().toLowerCase();
+  if(s==='midnight')return 0;
+  const m=s.match(/^(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a|p)?$/);
+  if(!m)return null;
+  let h=+m[1], mi=m[2]?+m[2]:0;
+  if(mi>59)return null;
+  const ap=m[3];
+  if(ap){
+    if(h<1||h>12)return null;
+    if(ap[0]==='p'&&h<12)h+=12;
+    if(ap[0]==='a'&&h===12)h=0;
+  }
+  if(h>24||(h===24&&mi>0))return null;
+  return h*60+mi;
+}
+// A start time must be before midnight.
+const readStart=v=>{const e=parseTime(v);return e===null||e>=1440?null:e};
+// An end time of 00:00 is treated as midnight at the end of the day (1440).
+const readEnd=v=>{const e=parseTime(v);return e===null?null:(e===0?1440:e)};
+
+// Escape text before putting it into HTML.
+const esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+
+/* ---------------------------------------------------------------------------
+   3c. BLOCK GEOMETRY, LANES AND STATISTICS
+   --------------------------------------------------------------------------- */
+
+// Wrap any number of minutes into the 0 to 1439 range.
+const mod=x=>((x%1440)+1440)%1440;
+// Map a start-plus-length back to an end value in the 1 to 1440 range.
+const endOf=x=>((x-1)%1440+1440)%1440+1;
+// Round to the nearest 5 minutes (the grid used for drag and create).
+const snapMin=m=>Math.round(m/5)*5;
+// Length of a block in minutes. Handles blocks that cross midnight.
+const dur=b=>(b.end-b.start+1440)%1440||1440;
+// Set a block's start and length together, keeping start/end normalised.
+const setSpan=(b,s,len)=>{b.start=mod(s);b.end=endOf(b.start+len)};
+// The area object a block belongs to (falls back to the first area).
+const areaOf=b=>areas.find(a=>a.id===b.area)||areas[0];
+// Is a stored block usable? Used when loading or restoring a backup.
+const valid=b=>b&&typeof b.name==='string'&&areas.some(a=>a.id===b.area)&&Number.isInteger(b.start)&&Number.isInteger(b.end)&&b.start>=0&&b.start<1440&&b.end>=1&&b.end<=1440&&b.end!==b.start;
+// Message shown when a block crosses midnight.
+const wrapMsg=(s,e)=>`Wraps past midnight: ${fmtT(s)} – Midnight, then Midnight – ${fmtT(e)}`;
+
+// A block that crosses midnight is drawn as two pieces: [start, 1440] and [0, end].
+// Other blocks produce a single piece. Each piece is a "segment".
+function segs(b){
+  const d=dur(b), e=b.start+d;
+  if(e<=1440)return [{b,s:b.start,e,first:true,last:true}];
+  return [{b,s:b.start,e:1440,first:true,last:false},{b,s:0,e:e-1440,first:false,last:true}];
+}
+
+// Work out where each segment goes so that overlapping segments sit side by side.
+// Segments are grouped into clusters of mutually overlapping ones. Each cluster
+// gets as many lanes as it needs: n is the lane count and lane is this segment's lane.
+// A block that is in a cluster with more than one lane is flagged conf (overlapping).
+function layout(){
+  const all=boxes.flatMap(segs).sort((a,b)=>a.s-b.s||a.e-b.e);
+  boxes.forEach(b=>b.conf=false);
+  let cl=[], cEnd=-1, lanes=[];
+  const flush=()=>{
+    cl.forEach(x=>{x.n=lanes.length;if(lanes.length>1)x.b.conf=true});
+    cl=[];lanes=[];
+  };
+  for(const x of all){
+    if(cl.length&&x.s>=cEnd)flush();          // this segment starts a new cluster
+    let i=lanes.findIndex(v=>v<=x.s);         // reuse a lane that is free by now
+    if(i<0){i=lanes.length;lanes.push(x.e)}   // otherwise open a new lane
+    else lanes[i]=x.e;
+    x.lane=i;cl.push(x);cEnd=Math.max(cEnd,x.e);
+  }
+  flush();
+  return all;
+}
+
+// Which minutes of the day are covered by at least one block (1440 cells).
+function coverage(){
+  const cov=new Uint8Array(1440);
+  boxes.forEach(b=>segs(b).forEach(x=>cov.fill(1,x.s,x.e)));
+  return cov;
+}
+
+// The longest run of uncovered minutes, wrapping past midnight.
+// Returns { len: length in minutes, at: start minute }.
+function longestGap(cov){
+  let best=0,at=0,run=0;
+  for(let i=0;i<2880;i++){                    // two laps, so runs can wrap
+    const j=i%1440;
+    if(cov[j]){run=0}
+    else{run++;if(run>best){best=Math.min(run,1440);at=(i-run+1+1440)%1440}}
+  }
+  return{len:best,at};
+}
+
+// Everything the sidebar and export need, computed in one place.
+function stats(){
+  const cov=coverage();
+  const gap=longestGap(cov);
+  // Longest block ignores areas whose countLongest flag is false (sleep by default).
+  const counted=boxes.filter(b=>areaOf(b).countLongest!==false);
+  return{
+    planned:cov.reduce((a,v)=>a+v,0),
+    pg:boxes.filter(b=>b.area==='pg').reduce((a,b)=>a+dur(b),0),
+    conf:boxes.filter(b=>b.conf).length,
+    count:boxes.length,
+    gap:gap.len,
+    longest:counted.length?Math.max(...counted.map(dur)):0
+  };
+}
+
+// Text for the "now" line: time left in the current block, or time until the next one.
+function nowLabel(nm){
+  const inside=boxes.find(b=>(nm-b.start+1440)%1440<dur(b));
+  if(inside)return `${fd(dur(inside)-(nm-inside.start+1440)%1440)} left`;
+  let best=null,bd=Infinity;
+  boxes.forEach(b=>{const d=(b.start-nm+1440)%1440;if(d<bd){bd=d;best=b}});
+  return best?`Next block in ${fd(bd)}`:'No blocks planned';
+}
+
+/* ---------------------------------------------------------------------------
+   3d. STATE, HISTORY AND PERSISTENCE
+   `areas` and `boxes` are the whole document. Everything else is UI state.
+   --------------------------------------------------------------------------- */
+
+let areas=[], boxes=[];
+let past=[], future=[];              // undo and redo stacks of snapshots (strings)
+let selId=null;                      // id of the selected block, or null
+let editId=null, editArea=null;      // block/area being edited in a dialog
+let draftColor=PALETTE[0];           // colour chosen in the area dialog
+let drag=null;                       // state of an in-progress block move/resize
+let areaDrag=null;                   // state of an in-progress area reorder
+let clickIgnore=false;               // true if the last pointerdown was on a block
+let lastTap={t:0,y:-99};             // last empty-space tap, for double-tap detection
+let lastBlockTap={id:null,t:0};      // last block tap, for double-tap detection
+
+// Serialise the document. This is what undo stores and what gets saved.
+const snap=()=>JSON.stringify({areas,boxes:boxes.map(({id,name,area,start,end})=>({id,name,area,start,end}))});
+// Restore a snapshot made by snap().
+const restore=s=>{const o=JSON.parse(s);areas=o.areas;boxes=o.boxes;selId=null};
+
+// Save the document to the browser.
+function save(){try{localStorage.setItem(KEY,snap())}catch(e){}}
+
+// Load the document from the browser, and migrate older data where needed.
+function load(){
+  try{
+    const v=JSON.parse(localStorage.getItem(KEY)||'null');
+    // Areas saved before the countLongest flag existed: only sleep defaults to off.
+    areas=(v&&Array.isArray(v.areas)&&v.areas.length?v.areas:DEFAULT_AREAS())
+      .map(a=>a.countLongest===undefined&&a.id==='sleep'?{...a,countLongest:false}:a);
+    boxes=v&&Array.isArray(v.boxes)?v.boxes.filter(valid).map(b=>({...b,id:b.id||uid(),name:b.name.slice(0,90)})):[];
+  }catch(e){areas=DEFAULT_AREAS();boxes=[]}
+}
+
+// Random id for new blocks and areas.
+const uid=()=>Math.random().toString(36).slice(2,9);
+
+// Record a finished change. `before` is the snapshot taken before the change.
+// If nothing actually changed, no undo step is added.
+function commit(before){
+  if(before!==snap()){past.push(before);if(past.length>100)past.shift();future=[]}
+  save();render();
+}
+function undo(){if(!past.length)return;future.push(snap());restore(past.pop());save();render()}
+function redo(){if(!future.length)return;past.push(snap());restore(future.pop());save();render()}
+
+// Show a short message at the bottom of the screen for about 2.6 seconds.
+function toast(msg){
+  const t=$('toast');
+  t.textContent=msg;t.classList.add('on');
+  clearTimeout(toast.t);
+  toast.t=setTimeout(()=>t.classList.remove('on'),2600);
+}
+
+/* ---------------------------------------------------------------------------
+   3e. TIMELINE RENDERING
+   Rebuilds the timeline from the data. Called after every change.
+   --------------------------------------------------------------------------- */
+
+function paint(){
+  const all=layout();
+  const now=new Date(), nm=now.getHours()*60+now.getMinutes();
+  let h='';
+
+  // Hour lines, half-hour guides and hour labels.
+  for(let i=0;i<24;i++){
+    h+=`<div class="ln" style="top:${i*60}px"></div><div class="ln half" style="top:${i*60+30}px"></div><div class="hr" style="top:${i*60}px">${fmtHour(i)}</div>`;
+  }
+  // Midnight boundary, labelled "Next day".
+  h+=`<div class="ln" style="top:1440px"></div><div class="hr nd" style="top:1440px">Next day</div>`;
+
+  // Blocks (one element per segment). Handles appear only on the first and last pieces.
+  for(const x of all){
+    const b=x.b, d=x.e-x.s, n=x.n;
+    const cls=['blk', n>1?'conf':'', d<40?'short':'', b.id===selId?'sel':''].filter(Boolean).join(' ');
+    h+=`<div class="${cls}" data-id="${b.id}" style="--c:${areaOf(b).color};top:${x.s}px;height:${d}px;left:calc(${x.lane*100/n}% + 3px);width:calc(${100/n}% - 6px)">`
+      +(x.first?'<div class="hdl" data-h="top"></div>':'')
+      +`<div class="nm">${esc(b.name)}</div>`
+      +(x.first?`<span class="atag">${esc(areaOf(b).name)}</span>`:'')
+      +`<div class="tm">${fmtT(b.start)} – ${fmtT(b.end)} · ${fd(dur(b))}</div>`
+      +(x.last?'<div class="hdl" data-h="bot"></div>':'')
+      +`</div>`;
+  }
+
+  // The "now" line with its countdown label.
+  h+=`<div class="now" style="top:${nm}px"><span class="nowlbl">${nowLabel(nm)}</span></div>`;
+  $('tl').innerHTML=h;
+}
+
+/* ---------------------------------------------------------------------------
+   3f. SIDEBAR RENDERING
+   The stats grid and the areas list. Area order here drives the stats order.
+   --------------------------------------------------------------------------- */
+
+function renderSide(){
+  const st=stats();
+
+  // Stats: fixed cells first, then one cell per area in area-list order.
+  const cell=(label,val,cls='')=>`<div class="stat"><span class="muted">${label}</span><b${cls?` class="${cls}"`:''}>${val}</b></div>`;
+  $('statsgrid').innerHTML=[
+    cell('Planned',fd(st.planned)),
+    cell('Free',fd(1440-st.planned)),
+    cell('Blocks',st.count),
+    cell('Longest block',st.longest?fd(st.longest):'0m'),
+    cell('Longest gap',fd(st.gap)),
+    cell('Overlapping',st.conf,st.conf?'warn':''),
+    ...areas.map(a=>{
+      const t=boxes.filter(b=>b.area===a.id).reduce((s,b)=>s+dur(b),0);
+      return cell(`<span class="dot" style="background:${a.color}"></span>${esc(a.name)}`,fd(t));
+    })
+  ].join('');
+
+  // Areas list: one row per area (the grip reorders, the rest of the row edits).
+  $('areas').innerHTML=areas.map((a,i)=>{
+    const t=boxes.filter(b=>b.area===a.id).reduce((s,b)=>s+dur(b),0);
+    return `<div class="row arow" data-area="${a.id}" data-idx="${i}"><span class="grip">${GRIP}</span><span class="dot" style="background:${a.color}"></span><span class="grow">${esc(a.name)}</span><span class="muted">${fd(t)}</span></div>`;
+  }).join('')+`<button class="row add" id="addarea">+ Add area</button>`;
+  $('addarea').onclick=()=>openArea(null);
+}
+
+/* ---------------------------------------------------------------------------
+   3g. DISPLAY CONTROLS: TIME FORMAT AND THEME
+   --------------------------------------------------------------------------- */
+
+// Redraw everything. The one entry point the rest of the app calls after a change.
+function render(){
+  paint();
+  renderSide();
+  checkConfetti();
+  $('undo').disabled=!past.length;
+  $('redo').disabled=!future.length;
+  document.querySelectorAll('#fmt button').forEach(x=>x.setAttribute('aria-pressed',String(x.dataset.f===fmt)));
+}
+
+// Switch between 12h and 24h and remember the choice.
+function setFmt(f){fmt=f;localStorage.setItem(FMT_KEY,f);render()}
+$('fmt').onclick=e=>{const f=e.target.dataset.f;if(f&&f!==fmt)setFmt(f)};
+
+const root=document.documentElement;
+// True if dark mode is currently showing (manual choice first, then system setting).
+const isDark=()=>root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+// Set the manual theme. Passing nothing removes the override and follows the system.
+function applyTheme(t){if(t)root.dataset.theme=t;else delete root.dataset.theme}
+const SUN='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>';
+const MOON='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
+// Show a sun while dark is active (tap for light) and a moon otherwise.
+function paintTheme(){$('theme').innerHTML=isDark()?SUN:MOON}
+$('theme').onclick=()=>{const t=isDark()?'light':'dark';applyTheme(t);localStorage.setItem(THEME_KEY,t);paintTheme()};
+if(localStorage.getItem(THEME_KEY))applyTheme(localStorage.getItem(THEME_KEY));
+paintTheme();
+
+/* ---------------------------------------------------------------------------
+   3h. BLOCK EDITOR DIALOG
+   Opened by double-clicking a block, double-tapping empty space, or pressing
+   "+ New block". Times are read back with readStart/readEnd.
+   --------------------------------------------------------------------------- */
+
+// Fill the area dropdown from the current area list.
+function fillAreas(sel){
+  $('farea').innerHTML=areas.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  $('farea').value=sel;
+}
+
+// Live hint under the time fields: duration, or a note about crossing midnight.
+function hint(){
+  const s=readStart($('fs').value), e=readEnd($('fe').value);
+  if(s===null||e===null){
+    const bad=(s===null&&$('fs').value)||(e===null&&$('fe').value);
+    $('fhint').textContent=bad?'Use a time like 9:30 AM or 21:30':'';
+    return;
+  }
+  const d=(e-s+1440)%1440;
+  $('fhint').textContent=!d?'':(s+d>1440?`Crosses midnight: shown as two parts, ${fmtT(s)} – Midnight and Midnight – ${fmtT(e)}.`:`${fd(d)} long`);
+}
+
+// Open the block editor. isNew=true means the block does not exist yet.
+function openDialog(b,isNew){
+  if(!b)return;
+  editId=isNew?null:b.id;
+  $('dtitle').textContent=isNew?'New block':'Edit block';
+  $('fname').value=b.name||'';
+  fillAreas(b.area||areas[0].id);
+  $('fs').value=toHM(b.start);
+  $('fe').value=toHM(b.end);
+  $('fdel').hidden=isNew;
+  hint();
+  $('dlg').showModal();
+  $('fname').focus();
+}
+$('fs').oninput=hint;
+$('fe').oninput=hint;
+
+// Save: validate the fields, then create or update the block.
+$('form').onsubmit=e=>{
+  e.preventDefault();
+  const name=$('fname').value.trim();
+  const s=readStart($('fs').value), en=readEnd($('fe').value);
+  if(s===null||en===null){toast('Enter times like 9:30 AM or 21:30');return}
+  if(!name){toast('Add a name for this block');return}
+  if(en===s){toast("Start and end can't be the same");return}
+  const d=(en-s+1440)%1440||1440;
+  if(d<5){toast('Make it at least 5 minutes');return}
+
+  const before=snap();
+  const fields={name:name.slice(0,90),area:$('farea').value,start:s,end:en};
+  let id=editId;
+  if(id)Object.assign(boxes.find(x=>x.id===id),fields);
+  else{id=uid();boxes.push({id,...fields})}
+  selId=id;
+  $('dlg').close();
+  commit(before);
+
+  const b=boxes.find(x=>x.id===id);
+  if(s+d>1440)toast(wrapMsg(s,en));
+  else if(b.conf)toast('Overlaps another block');
+  else toast(editId?'Saved':'Added');
+};
+
+// Delete the block being edited.
+$('fdel').onclick=()=>{
+  const before=snap();
+  boxes=boxes.filter(b=>b.id!==editId);
+  selId=null;
+  $('dlg').close();
+  commit(before);
+  toast('Block deleted');
+};
+$('fcancel').onclick=()=>$('dlg').close();
+
+/* ---------------------------------------------------------------------------
+   3i. AREA EDITOR DIALOG
+   Opened from "+ Add area" or by tapping an area row.
+   --------------------------------------------------------------------------- */
+
+// Draw the colour swatches, highlighting the chosen one.
+function swatches(){
+  $('aswatch').innerHTML=PALETTE.map(c=>`<button type="button" class="sw" data-c="${c}" style="background:${c}" aria-pressed="${c===draftColor}" aria-label="Color ${c}"></button>`).join('');
+}
+$('aswatch').onclick=e=>{const c=e.target.dataset.c;if(c){draftColor=c;swatches()}};
+
+// Open the area editor. id=null means a new area.
+function openArea(id){
+  editArea=id||null;
+  const a=areas.find(x=>x.id===editArea);
+  $('atitle').textContent=a?'Edit area':'New area';
+  $('aname').value=a?a.name:'';
+  $('acount').checked=a?a.countLongest!==false:true;
+  // A new area gets the first palette colour not used yet.
+  draftColor=a?a.color:(PALETTE.find(c=>!areas.some(x=>x.color===c))||PALETTE[0]);
+  swatches();
+  $('adel').hidden=!a;
+  $('adlg').showModal();
+  $('aname').focus();
+}
+
+// Save the area: update it, or add a new one (limit of 12 areas).
+$('aform').onsubmit=e=>{
+  e.preventDefault();
+  const name=$('aname').value.trim();
+  if(!name){toast('Give the area a name');return}
+  const before=snap();
+  if(editArea){
+    const a=areas.find(x=>x.id===editArea);
+    a.name=name.slice(0,40);a.color=draftColor;a.countLongest=$('acount').checked;
+  }else{
+    if(areas.length>=12){toast('Up to 12 areas');return}
+    areas=[...areas,{id:uid(),name:name.slice(0,40),color:draftColor,countLongest:$('acount').checked}];
+  }
+  $('adlg').close();
+  commit(before);
+  toast(editArea?'Area saved':'Area added');
+};
+
+// Delete the area and all of its blocks. The last remaining area cannot be deleted.
+$('adel').onclick=()=>{
+  if(areas.length<=1){toast('Keep at least one area');return}
+  const n=boxes.filter(b=>b.area===editArea).length;
+  if(!confirm(`Delete this area${n?` and its ${n} block${n>1?'s':''}`:''}?`))return;
+  const before=snap();
+  areas=areas.filter(a=>a.id!==editArea);
+  boxes=boxes.filter(b=>b.area!==editArea);
+  selId=null;
+  $('adlg').close();
+  commit(before);
+  toast('Area deleted');
+};
+$('acancel').onclick=()=>$('adlg').close();
+
+/* ---------------------------------------------------------------------------
+   3j. TIMELINE POINTER INPUT
+   Pointer events handle mouse, pen and touch the same way.
+   - Pressing a block selects it. Dragging the body moves it.
+     Dragging a grab handle resizes it from that edge.
+   - Two presses on the same block within 400 ms open the editor.
+   - Pressing empty space clears any selection. Two taps within 400 ms
+     (and 16 px) create a new block at that time.
+   Pointer capture is set on the timeline, not the block, because the block
+   is rebuilt while it is being dragged.
+   --------------------------------------------------------------------------- */
+
+const tl=$('tl');
+
+tl.addEventListener('pointerdown',e=>{
+  const el=e.target.closest('.blk');
+  clickIgnore=!!el;               // stops the following click from also creating a block
+  if(!el||e.button!==0)return;
+  const b=boxes.find(x=>x.id===el.dataset.id);
+  if(!b)return;
+
+  // Second press on the same block shortly after the first: open the editor.
+  const nowT=Date.now();
+  if(lastBlockTap.id===b.id&&nowT-lastBlockTap.t<400){lastBlockTap={id:null,t:0};openDialog(b,false);return}
+  lastBlockTap={id:b.id,t:nowT};
+
+  e.preventDefault();
+  selId=b.id;
+  document.querySelectorAll('.blk.sel').forEach(x=>x.classList.remove('sel'));
+  el.classList.add('sel');
+  tl.setPointerCapture(e.pointerId);
+  // A grab handle means resize from that edge; anywhere else means move.
+  drag={b,mode:e.target.dataset.h==='top'?'top':e.target.dataset.h==='bot'?'bot':'move',
+        y:e.clientY,s0:b.start,d0:dur(b),before:snap(),moved:false};
+});
+
+tl.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  const d=snapMin(e.clientY-drag.y), b=drag.b;
+  let s=drag.s0, len=drag.d0;
+  if(drag.mode==='move'){
+    s=mod(drag.s0+d);                       // length stays the same
+  }else if(drag.mode==='top'){
+    len=Math.min(1440,Math.max(5,drag.d0-d));  // top edge moves, bottom stays put
+    s=mod(drag.s0+drag.d0-len);
+  }else{
+    len=Math.min(1440,Math.max(5,drag.d0+d));  // bottom edge moves, top stays put
+  }
+  if(s===b.start&&endOf(s+len)===b.end)return;   // nothing changed
+  setSpan(b,s,len);
+  drag.moved=true;
+  paint();                                   // redraw only the timeline while dragging
+});
+
+// Finish a drag: commit it as one undo step and explain what happened.
+function endDrag(){
+  if(!drag)return;
+  const d=drag;drag=null;
+  if(!d.moved)return;                        // a simple click, nothing to commit
+  commit(d.before);
+  const b=d.b, len=dur(b);
+  const range=`${fmtT(b.start)} – ${fmtT(b.end)}`;
+  const base=d.mode==='move'?`Moved to ${range} · ${fd(len)}`:`Resized to ${range} · ${fd(len)}`;
+  const extras=[];
+  if(b.start+len>1440)extras.push('crosses midnight');
+  if(b.conf)extras.push('overlaps another block');
+  toast(extras.length?`${base} · ${extras.join(' · ')}`:base);
+}
+tl.addEventListener('pointerup',endDrag);
+tl.addEventListener('pointercancel',endDrag);
+
+// Click on empty space: deselect, and detect a double-tap that creates a block.
+tl.addEventListener('click',e=>{
+  if(clickIgnore||e.target.closest('.blk'))return;
+  const y=e.clientY-tl.getBoundingClientRect().top, now=Date.now();
+  if(selId){selId=null;render()}
+  if(now-lastTap.t<400&&Math.abs(y-lastTap.y)<16){
+    lastTap={t:0,y:-99};
+    const s=Math.min(1435,Math.max(0,snapMin(y)));
+    openDialog({name:'',area:areas[0].id,start:s,end:Math.min(1440,Math.max(5,s+60))},true);
+    return;
+  }
+  lastTap={t:now,y};
+});
+
+/* ---------------------------------------------------------------------------
+   3k. KEYBOARD SHORTCUTS
+   Ignored while a dialog is open, so typing in forms is not affected.
+   --------------------------------------------------------------------------- */
+
+document.addEventListener('keydown',e=>{
+  if($('dlg').open||$('adlg').open)return;
+  // Undo and redo (Cmd or Ctrl, with Shift for redo).
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo();return}
+  if(!selId)return;
+  const b=boxes.find(x=>x.id===selId);
+  if(!b)return;
+  if(e.key==='Escape'){selId=null;render();return}
+  if(e.key==='Enter'){openDialog(b,false);return}
+  if(e.key==='Delete'||e.key==='Backspace'){
+    e.preventDefault();
+    const before=snap();
+    boxes=boxes.filter(x=>x!==b);selId=null;
+    commit(before);toast('Block deleted');
+    return;
+  }
+  if(e.key==='ArrowUp'||e.key==='ArrowDown'){
+    e.preventDefault();
+    const step=(e.shiftKey?15:5)*(e.key==='ArrowUp'?-1:1);
+    const before=snap();
+    if(e.altKey)setSpan(b,b.start,Math.min(1440,Math.max(5,dur(b)+step)));   // resize
+    else setSpan(b,b.start+step,dur(b));                                    // move
+    commit(before);
+  }
+});
+
+/* ---------------------------------------------------------------------------
+   3l. HEADER BUTTONS: UNDO, REDO, ADD, CLEAR, BACKUP, RESTORE
+   --------------------------------------------------------------------------- */
+
+$('undo').onclick=undo;
+$('redo').onclick=redo;
+
+// Create a block starting at the current time, rounded to 5 minutes.
+$('add').onclick=()=>{
+  const n=new Date();
+  const s=Math.min(1435,Math.max(0,snapMin(n.getHours()*60+n.getMinutes())));
+  openDialog({name:'',area:areas[0].id,start:s,end:Math.min(1440,s+60)},true);
+};
+
+$('clr').onclick=()=>{
+  if(!boxes.length){toast('Nothing to clear');return}
+  if(!confirm('Clear all blocks for today?'))return;
+  const before=snap();
+  boxes=[];selId=null;
+  commit(before);toast('Day cleared');
+};
+
+// Download the whole document as a JSON file.
+$('bak').onclick=()=>{
+  const blob=new Blob([JSON.stringify({app:'Dayframe',version:3,areas,boxes:JSON.parse(snap()).boxes},null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob), a=document.createElement('a');
+  a.href=url;a.download='dayframe-backup.json';a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1500);
+};
+
+// Restore from a JSON backup. Replaces the current day after confirmation.
+$('res').onclick=()=>$('file').click();
+$('file').onchange=async e=>{
+  const f=e.target.files[0];
+  e.target.value='';
+  if(!f)return;
+  try{
+    const p=JSON.parse(await f.text());
+    if(!p||!Array.isArray(p.boxes))throw new Error('not a backup');
+    const newAreas=Array.isArray(p.areas)?p.areas.filter(a=>a&&typeof a.id==='string'&&typeof a.name==='string'&&typeof a.color==='string'):[];
+    const before=snap(), prev=areas;
+    areas=newAreas.length?newAreas:DEFAULT_AREAS();
+    const imp=p.boxes.filter(valid).map(b=>({id:uid(),name:b.name.slice(0,90),area:b.area,start:b.start,end:b.end}));
+    if(!confirm(`Replace today's schedule with ${imp.length} block${imp.length===1?'':'s'}?`)){areas=prev;return}
+    boxes=imp;selId=null;
+    commit(before);toast('Backup restored');
+  }catch(err){toast('That file is not a Dayframe backup')}
+};
+
+/* ---------------------------------------------------------------------------
+   3m. PNG EXPORT
+   Draws the day onto a canvas at phone proportions (390 x 844 points, 3x).
+   It does not use the page's DOM, so the export is independent of the
+   current theme: it is always light.
+   --------------------------------------------------------------------------- */
+
+function exportPNG(){
+  // Ask for a title; remember the last one typed.
+  const savedTitle=localStorage.getItem(TITLE_KEY)||'Dayframe';
+  const ans=prompt('Title for the exported image',savedTitle);
+  if(ans===null)return;
+  const title=ans.trim()||'Dayframe';
+  localStorage.setItem(TITLE_KEY,title);
+
+  layout();
+  const W=390,H=844,S=3;
+  const c=document.createElement('canvas');
+  c.width=W*S;c.height=H*S;
+  const x=c.getContext('2d');
+  x.scale(S,S);
+
+  // Drawing helpers.
+  const F=(w,s)=>`${w} ${s}px -apple-system,BlinkMacSystemFont,"SF Pro Display",Helvetica,Arial,sans-serif`;
+  const rr=(X,Y,w,h,r)=>{x.beginPath();x.moveTo(X+r,Y);x.arcTo(X+w,Y,X+w,Y+h,r);x.arcTo(X+w,Y+h,X,Y+h,r);x.arcTo(X,Y+h,X,Y,r);x.arcTo(X,Y,X+w,Y,r);x.closePath()};
+  const fit=(t,max)=>{if(x.measureText(t).width<=max)return t;while(t.length>1&&x.measureText(t+'…').width>max)t=t.slice(0,-1);return t+'…'};
+  const today=new Date();
+  const dateStr=new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric'}).format(today);
+
+  // Background, title and date.
+  x.fillStyle='#f2f2f7';x.fillRect(0,0,W,H);
+  x.fillStyle='#1d1d1f';x.font=F(700,24);x.fillText(fit(title,W-40),20,44);
+  x.fillStyle='#86868b';x.font=F(400,14);x.fillText(dateStr,20,66);
+
+  // Legend: area names and totals, laid out in rows. Measured first so the
+  // timeline can use whatever height is left.
+  const LH=22,LR=13;
+  x.font=F(500,LR);
+  let row=0,cx=20;
+  const legend=areas.map(a=>{
+    const t=boxes.filter(b=>b.area===a.id).reduce((s,b)=>s+dur(b),0);
+    const label=`${a.name} · ${fd(t)}`,w=x.measureText(label).width+18+12;
+    if(cx+w>W-20&&cx>20){row++;cx=20}
+    const item={a,label,X:cx,row};
+    cx+=w;return item;
+  });
+  const legendTop=H-40-(row+1)*LH;
+
+  // Timeline card.
+  const CX=12,CY=84,CW=W-24,CH=legendTop-CY-12;
+  x.fillStyle='#ffffff';rr(CX,CY,CW,CH,20);x.fill();
+  const TY=CY+14,TH=CH-44,TX=CX+46,TW=CW-46-12;
+
+  // Hour lines (solid) and half-hour guides (dashed), with labels.
+  for(let i=0;i<24;i++){
+    const y=TY+i*TH/24, yh=TY+(i+.5)*TH/24;
+    x.strokeStyle='#d1d1d6';x.lineWidth=1;x.beginPath();x.moveTo(TX,y+.5);x.lineTo(TX+TW,y+.5);x.stroke();
+    x.strokeStyle='#e5e5ea';x.beginPath();x.setLineDash([3,3]);x.moveTo(TX,yh+.5);x.lineTo(TX+TW,yh+.5);x.stroke();x.setLineDash([]);
+    x.fillStyle='#86868b';x.font=F(400,11);x.textAlign='right';x.fillText(fmtHour(i),TX-8,y+4);
+  }
+  x.textAlign='left';
+
+  // Midnight line with its label.
+  x.strokeStyle='#d1d1d6';x.lineWidth=1;x.beginPath();x.moveTo(TX,TY+TH+.5);x.lineTo(TX+TW,TY+TH+.5);x.stroke();
+  x.fillStyle='#1d1d1f';x.font=F(600,11);x.textAlign='right';x.fillText('Next day',CX+CW-14,TY+TH+15);x.textAlign='left';
+
+  // Blocks. Each one is an opaque white base with a tint on top, so the guides
+  // underneath do not show through. Blocks shorter than 40 minutes use one line.
+  for(const sg of layout()){
+    const b=sg.b, col=areaOf(b).color;
+    const lw=(TW-6)/sg.n, X=TX+4+sg.lane*lw, w=lw-4;
+    const hh=Math.max(18,(sg.e-sg.s)*TH/1440);
+    const y0=Math.min(TY+sg.s*TH/1440,TY+TH-hh);
+    x.fillStyle='#ffffff';rr(X,y0+1,w,hh-2,8);x.fill();
+    x.fillStyle=col+'33';rr(X,y0+1,w,hh-2,8);x.fill();
+    x.fillStyle=col;rr(X,y0+1,4,hh-2,2);x.fill();
+    const tx=X+12, maxW=w-18, range=`${fmtT(b.start)} – ${fmtT(b.end)}`;
+    if(hh>=40){
+      x.fillStyle='#1d1d1f';x.font=F(600,13);x.fillText(fit(b.name,maxW),tx,y0+17);
+      x.fillStyle='#86868b';x.font=F(400,11);x.fillText(fit(`${range} · ${fd(dur(b))}`,maxW),tx,y0+31);
+    }else{
+      x.fillStyle='#86868b';x.font=F(400,11);
+      const tw=x.measureText(range).width;
+      x.fillText(range,X+w-8-tw,y0+hh/2+4);
+      x.fillStyle='#1d1d1f';x.font=F(600,13);
+      x.fillText(fit(b.name,maxW-tw-8),tx,y0+hh/2+4.5);
+    }
+  }
+
+  // Legend dots and labels.
+  x.font=F(500,LR);
+  for(const it of legend){
+    const ty=legendTop+it.row*LH+15;
+    x.fillStyle=it.a.color;x.beginPath();x.arc(it.X+5,ty-4,5,0,Math.PI*2);x.fill();
+    x.fillStyle='#1d1d1f';x.fillText(it.label,it.X+18,ty);
+  }
+
+  // Footer credit.
+  x.fillStyle='#86868b';x.font=F(400,11);x.textAlign='center';
+  x.fillText('Made with Dayframe',W/2,H-14);
+  x.textAlign='left';
+
+  // Save the PNG as a download.
+  c.toBlob(bl=>{
+    if(!bl){toast('Export failed');return}
+    const url=URL.createObjectURL(bl), a=document.createElement('a');
+    a.href=url;a.download=`dayframe-${today.toISOString().slice(0,10)}.png`;a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1500);
+    toast('Image saved');
+  },'image/png');
+}
+$('png').onclick=exportPNG;
+
+/* ---------------------------------------------------------------------------
+   3n. AREA REORDERING
+   Press the grip on an area row and drag. The row follows the pointer, and
+   on release the new order is committed (so it can be undone). Stats follow
+   the same order because they are generated from the area list.
+   --------------------------------------------------------------------------- */
+
+$('areas').addEventListener('click',e=>{
+  if(e.target.closest('.grip'))return;      // a grip press is a drag, not an edit
+  const r=e.target.closest('[data-area]');
+  if(r)openArea(r.dataset.area);
+});
+$('areas').addEventListener('pointerdown',e=>{
+  const g=e.target.closest('.grip');
+  if(!g||e.button!==0)return;
+  e.preventDefault();
+  const row=g.closest('.arow'), rows=[...$('areas').querySelectorAll('.arow')];
+  areaDrag={
+    from:+row.dataset.idx, to:+row.dataset.idx,
+    startY:e.clientY, row, before:snap(),
+    // Vertical centre of each row, measured once at the start of the drag.
+    mids:rows.map(r=>{const q=r.getBoundingClientRect();return q.top+q.height/2})
+  };
+  row.classList.add('lifting');
+  g.setPointerCapture(e.pointerId);
+});
+$('areas').addEventListener('pointermove',e=>{
+  if(!areaDrag)return;
+  areaDrag.row.style.transform=`translateY(${e.clientY-areaDrag.startY}px)`;
+  // Find the slot the pointer is in, then correct for the row being removed from above it.
+  let to=areaDrag.mids.findIndex(m=>e.clientY<m);
+  if(to<0)to=areaDrag.mids.length;
+  if(to>areaDrag.from)to--;
+  areaDrag.to=to;
+});
+function endAreaDrag(){
+  if(!areaDrag)return;
+  const d=areaDrag;areaDrag=null;
+  if(d.from===d.to){render();return}       // nothing moved: just reset the row
+  const arr=[...areas];
+  const [m]=arr.splice(d.from,1);
+  arr.splice(d.to,0,m);
+  areas=arr;
+  commit(d.before);
+}
+$('areas').addEventListener('pointerup',endAreaDrag);
+$('areas').addEventListener('pointercancel',endAreaDrag);
+
+/* ---------------------------------------------------------------------------
+   3o. ONE-TIME CONFETTI
+   Fires once per page load, the first time free time goes from above zero to
+   exactly zero. Skipped when the user has asked for reduced motion.
+   --------------------------------------------------------------------------- */
+
+let confettiDone=false, prevFree=null;
+
+// Animate about 140 falling pieces in the area colours, then remove the canvas.
+function confetti(){
+  if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;
+  const cv=document.createElement('canvas');
+  cv.setAttribute('aria-hidden','true');
+  cv.style.cssText='position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:20';
+  document.body.appendChild(cv);
+  const dpr=Math.min(2,window.devicePixelRatio||1);
+  cv.width=innerWidth*dpr;cv.height=innerHeight*dpr;
+  const x=cv.getContext('2d');
+  x.scale(dpr,dpr);
+  const ps=Array.from({length:140},()=>({
+    x:Math.random()*innerWidth, y:-20-Math.random()*innerHeight*.4,
+    w:6+Math.random()*5, h:4+Math.random()*4,
+    c:PALETTE[Math.random()*PALETTE.length|0],
+    vy:1.6+Math.random()*2.2, vx:(Math.random()-.5)*1.2,
+    r:Math.random()*6.28, vr:(Math.random()-.5)*.2,
+    sw:Math.random()*6.28, round:Math.random()<.35
+  }));
+  const t0=performance.now(), DUR=3200;
+  function frame(t){
+    const el=t-t0;
+    x.clearRect(0,0,innerWidth,innerHeight);
+    x.globalAlpha=Math.max(0,Math.min(1,(DUR-el)/700));   // fade out over the last 0.7 s
+    for(const p of ps){
+      p.y+=p.vy; p.x+=p.vx+Math.sin(p.sw+el/400)*.6; p.r+=p.vr;
+      if(p.y>innerHeight+20)continue;
+      x.save();x.translate(p.x,p.y);x.rotate(p.r);x.fillStyle=p.c;
+      if(p.round){x.beginPath();x.arc(0,0,p.w/2.5,0,6.283);x.fill()}
+      else{x.fillRect(-p.w/2,-p.h/2,p.w,p.h)}
+      x.restore();
+    }
+    if(el<DUR)requestAnimationFrame(frame);else cv.remove();
+  }
+  requestAnimationFrame(frame);
+}
+
+// Called on every render. Fires the confetti on the first transition to zero free time.
+function checkConfetti(){
+  const free=1440-stats().planned;
+  if(prevFree!==null&&prevFree>0&&free===0&&!confettiDone){confettiDone=true;confetti()}
+  prevFree=free;
+}
+
+/* ---------------------------------------------------------------------------
+   3p. STARTUP
+   --------------------------------------------------------------------------- */
+
+// Show today's date in the header.
+$('date').textContent=new Intl.DateTimeFormat(undefined,{weekday:'long',month:'long',day:'numeric'}).format(new Date());
+load();
+render();
+// Scroll the timeline so the "now" line is in the middle of the screen.
+requestAnimationFrame(()=>{const n=document.querySelector('.now');if(n)n.scrollIntoView({block:'center'})});
+// Redraw every 30 seconds so the "now" line and countdown stay current.
+// Skipped while the user is dragging or a dialog is open, so nothing is interrupted.
+setInterval(()=>{if(!drag&&!areaDrag&&!$('dlg').open&&!$('adlg').open)render()},30000);
+
+})();
+</script>
+</body>
+</html>
